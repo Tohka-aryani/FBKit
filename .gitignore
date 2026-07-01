@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+post_url.txt
+simple_post/
+page_post/
+group_post/
+chromedata1/
+.DS_Store
