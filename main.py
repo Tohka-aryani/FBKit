@@ -10,6 +10,7 @@ import requests
 from dotenv import load_dotenv
 
 from comment_scraper import PROXIES, clean_comment_item, fetch_comments, fetch_replies
+from progress_tracker import ProgressTracker
 
 load_dotenv()
 
@@ -40,7 +41,7 @@ def make_run_timestamp(when=None):
     return display, filename
 
 
-def extract_post_id_from_url(url, cookies=None):
+def extract_post_id_from_url(url, cookies=None, quiet=False):
     """Extract Facebook Post ID from a post URL."""
     url_patterns = [
         r"/groups/[^/]+/posts/(\d+)",
@@ -51,7 +52,8 @@ def extract_post_id_from_url(url, cookies=None):
         match = re.search(pattern, url)
         if match:
             post_id = match.group(1)
-            print(f"  Found Post ID in URL: {post_id}")
+            if not quiet:
+                print(f"  Found Post ID in URL: {post_id}")
             return post_id
 
     headers = {
@@ -60,7 +62,8 @@ def extract_post_id_from_url(url, cookies=None):
     }
 
     try:
-        print(f"  No direct ID in URL, fetching post: {url}")
+        if not quiet:
+            print(f"  No direct ID in URL, fetching post: {url}")
         response = requests.get(
             url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=20
         )
@@ -77,10 +80,12 @@ def extract_post_id_from_url(url, cookies=None):
                     parts = story_id_decoded.split(":")
                     if len(parts) >= 2:
                         post_id = parts[-1]
-                        print(f"  Found Post ID from storyID: {post_id}")
+                        if not quiet:
+                            print(f"  Found Post ID from storyID: {post_id}")
                         return post_id
                 except Exception as e:
-                    print(f"  Could not decode storyID: {e}")
+                    if not quiet:
+                        print(f"  Could not decode storyID: {e}")
 
         og_url_match = re.search(
             r'<meta property="og:url" content="([^"]+)"', html
@@ -94,14 +99,17 @@ def extract_post_id_from_url(url, cookies=None):
                 post_id = m.group(1)
 
         if post_id:
-            print(f"  Found Post ID from og:url: {post_id}")
+            if not quiet:
+                print(f"  Found Post ID from og:url: {post_id}")
             return post_id
 
-        print("  Post ID not found in URL")
+        if not quiet:
+            print("  Post ID not found in URL")
         return None
 
     except Exception as e:
-        print(f"  Error fetching URL: {e}")
+        if not quiet:
+            print(f"  Error fetching URL: {e}")
         return None
 
 
@@ -110,31 +118,33 @@ def convert_post_id_to_feedback_id(post_id):
     return base64.b64encode(f"feedback:{post_id}".encode()).decode()
 
 
-def fetch_comments_for_post(post_id, cookies=None, fb_dtsg=None):
+def fetch_comments_for_post(post_id, cookies=None, fb_dtsg=None, progress=None):
     """Fetch all comments and replies for a given post_id."""
     import comment_scraper
 
     comment_scraper.FB_DTSG = fb_dtsg or ""
 
     feedback_id = convert_post_id_to_feedback_id(post_id)
-    print(f"  Fetching comments for post {post_id}...")
-    print(f"  Using feedback_id: {feedback_id}")
 
     all_data = []
-    comments, post_info = fetch_comments(feedback_id, cookies=cookies)
+    comments, post_info = fetch_comments(
+        feedback_id, cookies=cookies, progress=progress
+    )
 
-    for c in comments:
-        author = c.get("author") or "Unknown"
-        print(f"    {author}: {c.get('text', '')[:50]}...")
+    total_replies = 0
+    if progress is not None:
+        progress.start_replies(len(comments))
+
+    for idx, c in enumerate(comments, 1):
+        if progress is not None:
+            progress.update_replies(idx, len(comments))
         c["replies"] = fetch_replies(c, cookies=cookies)
-
-        for r in c["replies"]:
-            reply_author = r.get("author") or "Unknown"
-            print(f"       -> {reply_author}: {r.get('text', '')[:50]}...")
-
+        total_replies += len(c["replies"])
         all_data.append(clean_comment_item(c))
 
-    print(f"  Found {len(all_data)} comments")
+    if progress is not None:
+        progress.finish_post(len(all_data), total_replies)
+
     return all_data, post_info
 
 
@@ -156,21 +166,25 @@ def save_batch_output(posts, failures, scraped_at_display, filename_stamp):
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
-    print(f"\nSaved batch output to {output_file}")
     return output_file
 
 
-def scrape_single_post_url(url, cookies=None, fb_dtsg=None):
+def scrape_single_post_url(url, cookies=None, fb_dtsg=None, progress=None):
     """Scrape comments and replies for one Facebook post URL."""
-    print(f"\nProcessing: {url}")
-    post_id = extract_post_id_from_url(url, cookies=cookies)
+    quiet = progress is not None
+
+    if progress is not None:
+        progress.set_phase("resolving post ID")
+
+    post_id = extract_post_id_from_url(url, cookies=cookies, quiet=quiet)
     if not post_id:
-        print("  Could not extract post ID from URL")
         return None
 
-    print(f"  Post ID: {post_id}")
+    if progress is not None:
+        progress.set_post_id(post_id)
+
     comments, post_info = fetch_comments_for_post(
-        post_id, cookies=cookies, fb_dtsg=fb_dtsg
+        post_id, cookies=cookies, fb_dtsg=fb_dtsg, progress=progress
     )
 
     return {
@@ -190,32 +204,36 @@ def scrape_posts_from_file(filepath=POST_URL_FILE, cookies=None, fb_dtsg=None):
         return
 
     scraped_at_display, filename_stamp = make_run_timestamp()
-    print(f"Loaded {len(urls)} URL(s) from {filepath}")
-    print(f"Batch timestamp: {scraped_at_display}")
 
     posts = []
     failures = []
 
-    for i, url in enumerate(urls, 1):
-        print(f"\n[{i}/{len(urls)}]", end="")
-        try:
-            result = scrape_single_post_url(url, cookies=cookies, fb_dtsg=fb_dtsg)
-            if result:
-                posts.append(result)
-            else:
-                failures.append({"url": url, "error": "Could not extract post ID"})
-        except Exception as e:
-            print(f"  Error: {e}")
-            failures.append({"url": url, "error": str(e)})
+    with ProgressTracker() as progress:
+        progress.start_batch(len(urls))
 
-        if i < len(urls):
-            time.sleep(1)
+        for i, url in enumerate(urls, 1):
+            progress.start_post(i, url)
+            try:
+                result = scrape_single_post_url(
+                    url, cookies=cookies, fb_dtsg=fb_dtsg, progress=progress
+                )
+                if result:
+                    posts.append(result)
+                else:
+                    failures.append({"url": url, "error": "Could not extract post ID"})
+            except Exception as e:
+                progress.console.print(f"[bold red]Error:[/bold red] {e}")
+                failures.append({"url": url, "error": str(e)})
 
-    save_batch_output(posts, failures, scraped_at_display, filename_stamp)
+            if i < len(urls):
+                progress.set_phase("waiting before next post")
+                time.sleep(3)
 
-    print(f"\n{'=' * 60}")
-    print(f"Batch complete: {len(posts)} succeeded, {len(failures)} failed")
-    print(f"Output directory: {OUTPUT_DIR}/")
+        progress.set_phase("saving batch")
+        output_file = save_batch_output(
+            posts, failures, scraped_at_display, filename_stamp
+        )
+        progress.finish_batch(len(posts), len(failures), output_file)
 
 
 if __name__ == "__main__":

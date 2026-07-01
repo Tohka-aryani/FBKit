@@ -185,8 +185,10 @@ def fb_json(response_text):
     return json.loads(first)
 
 
-def fetch_comments(feedback_id, cookies=None):
+def _fetch_comments_once(feedback_id, cookies=None, progress=None):
     results = []
+    seen_comment_ids = set()
+    seen_cursors = set()
     cursor = None
     response_count = 0
     post_info = None  # Store parent post info from first response
@@ -202,11 +204,7 @@ def fetch_comments(feedback_id, cookies=None):
         )
         j = fb_json(r.text)
         
-        # Save each JSON response for inspection
         response_count += 1
-        # with open(f"response_{response_count}.json", "w", encoding="utf-8") as f:
-        #     json.dump(j, f, ensure_ascii=False, indent=2)
-        # print(f"💾 Saved response_{response_count}.json")
         
         comments_block = (
             j.get("data", {})
@@ -219,6 +217,7 @@ def fetch_comments(feedback_id, cookies=None):
         if not edges:
             break
 
+        new_on_page = 0
         for e in edges:
             n = e["node"]
             fb = n["feedback"]
@@ -241,23 +240,61 @@ def fetch_comments(feedback_id, cookies=None):
                             post_info["media_id"] = media.get("id")
                             break  # Only get first one
                     
-                    print(f"📎 Extracted post info: {post_info}")
+                    if progress is None:
+                        print(f"📎 Extracted post info: {post_info}")
 
             reactors = fb.get("reactors", {})
             total_reactions = reactors.get("count_reduced", "0")
 
             item = parse_comment_node(n)
+            comment_id = item.get("comment_id")
+            if comment_id and comment_id in seen_comment_ids:
+                continue
+            if comment_id:
+                seen_comment_ids.add(comment_id)
+
             item["reaction_count"] = total_reactions
             results.append(item)
+            new_on_page += 1
 
-        cursor = comments_block.get("page_info", {}).get("end_cursor")
-        #break
-        if not cursor:
+        if progress is not None:
+            progress.update_comments_page(response_count, len(results))
+
+        page_info = comments_block.get("page_info", {})
+        if not page_info.get("has_next_page"):
             break
-
-        #time.sleep(0.4)
+        next_cursor = page_info.get("end_cursor")
+        if not next_cursor or next_cursor in seen_cursors or new_on_page == 0:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+        time.sleep(0.3)
 
     return results, post_info
+
+
+def fetch_comments(feedback_id, cookies=None, progress=None):
+    """Fetch all comments, retrying when the API returns a truncated result."""
+    if progress is not None:
+        progress.start_comments()
+
+    best_results, best_post_info = _fetch_comments_once(
+        feedback_id, cookies=cookies, progress=progress
+    )
+    for attempt in range(2, 4):
+        if progress is not None:
+            progress.comments_attempt(attempt, 3, len(best_results))
+        time.sleep(attempt * 2)
+        results, post_info = _fetch_comments_once(
+            feedback_id, cookies=cookies, progress=progress
+        )
+        if len(results) > len(best_results):
+            best_results, best_post_info = results, post_info
+
+    if progress is not None:
+        progress.finish_comments(len(best_results))
+
+    return best_results, best_post_info
 
 # ===== FETCH REPLIES =====
 

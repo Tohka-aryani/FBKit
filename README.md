@@ -8,12 +8,13 @@ CLI tool for batch-scraping Facebook post comments and replies via Facebook's un
 - Extract top-level comments with author names and reaction counts
 - Extract direct replies to each comment
 - JSON output per batch run under `output/` with a timestamp filename
+- Live terminal progress with elapsed time and ETA during scraping
 - Optional proxy support via `.env`
 
 ## Requirements
 
 - Python 3.8+
-- `requests`, `python-dotenv`
+- `requests`, `python-dotenv`, `rich`
 
 ## Installation
 
@@ -49,6 +50,8 @@ python main.py
 ```
 
 Output is written to `output/<YYYY-MM-DD HH-MM-SS>.json` (one combined file per run).
+
+While scraping, the terminal shows live progress: current post (`1/2`), phase (resolving ID, fetching comments, fetching replies), elapsed time, and estimated time remaining. When the batch finishes, a per-post timing summary is printed.
 
 ## Output format
 
