@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from html import unescape
 
 import requests
@@ -13,6 +14,7 @@ from comment_scraper import PROXIES, clean_comment_item, fetch_comments, fetch_r
 load_dotenv()
 
 POST_URL_FILE = "post_url.txt"
+OUTPUT_DIR = "output"
 
 
 def load_post_urls(filepath=POST_URL_FILE):
@@ -28,6 +30,14 @@ def load_post_urls(filepath=POST_URL_FILE):
                 continue
             urls.append(line)
     return urls
+
+
+def make_run_timestamp(when=None):
+    """Return display and filesystem-safe timestamp strings for a batch run."""
+    when = when or datetime.now()
+    display = when.strftime("%Y-%m-%d %H:%M:%S")
+    filename = when.strftime("%Y-%m-%d %H-%M-%S")
+    return display, filename
 
 
 def extract_post_id_from_url(url, cookies=None):
@@ -128,16 +138,26 @@ def fetch_comments_for_post(post_id, cookies=None, fb_dtsg=None):
     return all_data, post_info
 
 
-def save_post_data(post_id, post_data, comments_data):
-    """Save post and comments data under simple_post/<post_id>/."""
-    folder_path = os.path.join("simple_post", post_id)
-    os.makedirs(folder_path, exist_ok=True)
+def save_batch_output(posts, failures, scraped_at_display, filename_stamp):
+    """Save all scraped posts from one batch run to a timestamped JSON file."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    combined_data = {**post_data, "comments": comments_data}
-    output_file = os.path.join(folder_path, f"{post_id}.json")
+    output = {
+        "scraped_at": scraped_at_display,
+        "post_count": len(posts),
+        "succeeded": len(posts),
+        "failed": len(failures),
+        "posts": posts,
+    }
+    if failures:
+        output["failures"] = failures
+
+    output_file = os.path.join(OUTPUT_DIR, f"{filename_stamp}.json")
     with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(combined_data, f, ensure_ascii=False, indent=2)
-    print(f"  Saved to {output_file}")
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+    print(f"\nSaved batch output to {output_file}")
+    return output_file
 
 
 def scrape_single_post_url(url, cookies=None, fb_dtsg=None):
@@ -146,22 +166,19 @@ def scrape_single_post_url(url, cookies=None, fb_dtsg=None):
     post_id = extract_post_id_from_url(url, cookies=cookies)
     if not post_id:
         print("  Could not extract post ID from URL")
-        return False
+        return None
 
     print(f"  Post ID: {post_id}")
     comments, post_info = fetch_comments_for_post(
         post_id, cookies=cookies, fb_dtsg=fb_dtsg
     )
 
-    post_data = {
+    return {
         "post_id": post_id,
         "source_url": url,
-        "type": "simple_post",
         "post_info": post_info,
+        "comments": comments,
     }
-    save_post_data(post_id, post_data, comments)
-    print(f"  Done: simple_post/{post_id}/{post_id}.json")
-    return True
 
 
 def scrape_posts_from_file(filepath=POST_URL_FILE, cookies=None, fb_dtsg=None):
@@ -172,27 +189,33 @@ def scrape_posts_from_file(filepath=POST_URL_FILE, cookies=None, fb_dtsg=None):
         print("   Add one Facebook post URL per line.")
         return
 
+    scraped_at_display, filename_stamp = make_run_timestamp()
     print(f"Loaded {len(urls)} URL(s) from {filepath}")
-    succeeded = 0
-    failed = 0
+    print(f"Batch timestamp: {scraped_at_display}")
+
+    posts = []
+    failures = []
 
     for i, url in enumerate(urls, 1):
         print(f"\n[{i}/{len(urls)}]", end="")
         try:
-            if scrape_single_post_url(url, cookies=cookies, fb_dtsg=fb_dtsg):
-                succeeded += 1
+            result = scrape_single_post_url(url, cookies=cookies, fb_dtsg=fb_dtsg)
+            if result:
+                posts.append(result)
             else:
-                failed += 1
+                failures.append({"url": url, "error": "Could not extract post ID"})
         except Exception as e:
             print(f"  Error: {e}")
-            failed += 1
+            failures.append({"url": url, "error": str(e)})
 
         if i < len(urls):
             time.sleep(1)
 
+    save_batch_output(posts, failures, scraped_at_display, filename_stamp)
+
     print(f"\n{'=' * 60}")
-    print(f"Batch complete: {succeeded} succeeded, {failed} failed")
-    print("Output directory: simple_post/")
+    print(f"Batch complete: {len(posts)} succeeded, {len(failures)} failed")
+    print(f"Output directory: {OUTPUT_DIR}/")
 
 
 if __name__ == "__main__":

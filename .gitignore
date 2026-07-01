@@ -4,6 +4,7 @@ __pycache__/
 .env
 post_url.txt
 simple_post/
+output/
 page_post/
 group_post/
 chromedata1/

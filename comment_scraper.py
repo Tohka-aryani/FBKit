@@ -261,13 +261,15 @@ def fetch_comments(feedback_id, cookies=None):
 
 # ===== FETCH REPLIES =====
 
-def fetch_replies(comment, cookies=None, depth=0, max_depth=2):
-    """Fetch direct replies for a comment, with optional nested reply threads."""
+def fetch_replies(comment, cookies=None):
+    """Fetch direct replies for a comment."""
     if not comment.get("_feedback_id") or not comment.get("_expansion_token"):
         return []
 
     headers = {**BASE_HEADERS, "x-fb-friendly-name": "Depth1CommentsListPaginationQuery"}
     replies = []
+    seen_reply_ids = set()
+    seen_cursors = set()
     cursor = None
 
     while True:
@@ -294,32 +296,29 @@ def fetch_replies(comment, cookies=None, depth=0, max_depth=2):
         if not edges:
             break
 
+        new_on_page = 0
         for e in edges:
             n = e["node"]
             reply = parse_comment_node(n)
-            nested_replies = []
-
-            if (
-                depth < max_depth
-                and reply.get("_has_subreplies")
-                and reply.get("_feedback_id")
-            ):
-                nested_replies = fetch_replies(
-                    reply, cookies=cookies, depth=depth + 1, max_depth=max_depth
-                )
+            reply_id = reply.get("comment_id")
+            if reply_id and reply_id in seen_reply_ids:
+                continue
+            if reply_id:
+                seen_reply_ids.add(reply_id)
 
             clean_reply = clean_comment_item(reply)
             clean_reply["reply_id"] = clean_reply.pop("comment_id", None)
-            if nested_replies:
-                clean_reply["replies"] = nested_replies
             replies.append(clean_reply)
+            new_on_page += 1
 
         page_info = replies_block.get("page_info", {})
         if not page_info.get("has_next_page"):
             break
-        cursor = page_info.get("end_cursor")
-        if not cursor:
+        next_cursor = page_info.get("end_cursor")
+        if not next_cursor or next_cursor in seen_cursors or new_on_page == 0:
             break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
 
     return replies
 

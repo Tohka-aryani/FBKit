@@ -7,7 +7,7 @@ CLI tool for batch-scraping Facebook post comments and replies via Facebook's un
 - Batch scrape multiple posts from a URL list file
 - Extract top-level comments with author names and reaction counts
 - Extract direct replies to each comment
-- JSON output per post under `simple_post/<post_id>/`
+- JSON output per batch run under `output/` with a timestamp filename
 - Optional proxy support via `.env`
 
 ## Requirements
@@ -48,15 +48,18 @@ https://www.facebook.com/user/posts/pfbid...
 python main.py
 ```
 
-Output is written to `simple_post/<post_id>/<post_id>.json`.
+Output is written to `output/<YYYY-MM-DD HH-MM-SS>.json` (one combined file per run).
 
 ## Output format
 
-Each JSON file contains:
+Each batch JSON file contains:
 
-- `post_id`, `source_url`, `post_info`
-- `comments[]` with `author`, `author_id`, `text`, `reaction_count`
-- `replies[]` on each comment with the same fields plus `reply_id`
+- `scraped_at` — human-readable run time (e.g. `2026-07-01 17:03:00`)
+- `post_count`, `succeeded`, `failed`
+- `posts[]` — each entry has `post_id`, `source_url`, `post_info`, and `comments[]`
+- `failures[]` — optional list of `{url, error}` for URLs that could not be scraped
+
+Each comment includes `author`, `author_id`, `text`, `reaction_count`, and `replies[]` (with `reply_id`, `author`, etc.).
 
 ## Optional proxy configuration
 
