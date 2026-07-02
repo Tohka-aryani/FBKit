@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from comment_scraper import PROXIES, clean_comment_item, fetch_comments, fetch_replies
 from progress_tracker import ProgressTracker
+from url_resolver import extract_video_id_from_url, resolve_feedback_id_from_video
 
 load_dotenv()
 
@@ -118,13 +119,42 @@ def convert_post_id_to_feedback_id(post_id):
     return base64.b64encode(f"feedback:{post_id}".encode()).decode()
 
 
-def fetch_comments_for_post(post_id, cookies=None, fb_dtsg=None, progress=None):
-    """Fetch all comments and replies for a given post_id."""
+def resolve_url(url, cookies=None, quiet=False):
+    """Resolve a Facebook post or reel URL to scrape targets."""
+    video_id = extract_video_id_from_url(url)
+    if video_id:
+        if not quiet:
+            print(f"  Found Video ID in URL: {video_id}")
+        feedback_id = resolve_feedback_id_from_video(
+            video_id, cookies=cookies, quiet=quiet
+        )
+        return {
+            "content_id": video_id,
+            "content_type": "reel",
+            "feedback_id": feedback_id,
+        }
+
+    post_id = extract_post_id_from_url(url, cookies=cookies, quiet=quiet)
+    if post_id:
+        return {
+            "content_id": post_id,
+            "content_type": "post",
+            "feedback_id": convert_post_id_to_feedback_id(post_id),
+        }
+
+    return None
+
+
+def fetch_comments_for_post(
+    post_id, cookies=None, fb_dtsg=None, progress=None, feedback_id=None
+):
+    """Fetch all comments and replies for a post or reel."""
     import comment_scraper
 
     comment_scraper.FB_DTSG = fb_dtsg or ""
 
-    feedback_id = convert_post_id_to_feedback_id(post_id)
+    if feedback_id is None:
+        feedback_id = convert_post_id_to_feedback_id(post_id)
 
     all_data = []
     comments, post_info = fetch_comments(
@@ -174,21 +204,26 @@ def scrape_single_post_url(url, cookies=None, fb_dtsg=None, progress=None):
     quiet = progress is not None
 
     if progress is not None:
-        progress.set_phase("resolving post ID")
+        progress.set_phase("resolving URL")
 
-    post_id = extract_post_id_from_url(url, cookies=cookies, quiet=quiet)
-    if not post_id:
+    resolved = resolve_url(url, cookies=cookies, quiet=quiet)
+    if not resolved:
         return None
 
     if progress is not None:
-        progress.set_post_id(post_id)
+        progress.set_post_id(resolved["content_id"])
 
     comments, post_info = fetch_comments_for_post(
-        post_id, cookies=cookies, fb_dtsg=fb_dtsg, progress=progress
+        resolved["content_id"],
+        cookies=cookies,
+        fb_dtsg=fb_dtsg,
+        progress=progress,
+        feedback_id=resolved["feedback_id"],
     )
 
     return {
-        "post_id": post_id,
+        "post_id": resolved["content_id"],
+        "content_type": resolved["content_type"],
         "source_url": url,
         "post_info": post_info,
         "comments": comments,
@@ -220,7 +255,7 @@ def scrape_posts_from_file(filepath=POST_URL_FILE, cookies=None, fb_dtsg=None):
                 if result:
                     posts.append(result)
                 else:
-                    failures.append({"url": url, "error": "Could not extract post ID"})
+                    failures.append({"url": url, "error": "Could not resolve URL"})
             except Exception as e:
                 progress.console.print(f"[bold red]Error:[/bold red] {e}")
                 failures.append({"url": url, "error": str(e)})
