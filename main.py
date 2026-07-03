@@ -10,6 +10,7 @@ import requests
 from dotenv import load_dotenv
 
 from comment_scraper import PROXIES, clean_comment_item, fetch_comments, fetch_replies
+from post_content import resolve_post_title
 from progress_tracker import ProgressTracker
 from url_resolver import extract_video_id_from_url, resolve_feedback_id_from_video
 
@@ -52,44 +53,6 @@ def classify_post_url(url):
         return {"post_type": "group_post", "group_slug": group_match.group(1)}
 
     return {"post_type": "profile_post", "group_slug": None}
-
-
-def _parse_meta_content(html, property_name):
-    match = re.search(
-        rf'<meta property="{re.escape(property_name)}" content="([^"]*)"',
-        html,
-    )
-    return unescape(match.group(1)).strip() if match else None
-
-
-def fetch_page_metadata(url, cookies=None, post_type=None, quiet=False):
-    """Fetch post title from page HTML when GraphQL does not provide it."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-
-    try:
-        if not quiet:
-            print(f"  Fetching page metadata: {url}")
-        response = requests.get(
-            url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=20
-        )
-        html = response.text
-
-        post_title = _parse_meta_content(html, "og:description")
-        if not post_title:
-            og_title = _parse_meta_content(html, "og:title")
-            if og_title and post_type == "group_post" and " | " in og_title:
-                post_title = og_title.split(" | ", 1)[1].strip()
-            else:
-                post_title = og_title
-
-        return {"post_title": post_title or None}
-    except Exception as e:
-        if not quiet:
-            print(f"  Error fetching page metadata: {e}")
-        return {"post_title": None}
 
 
 def extract_post_id_from_url(url, cookies=None, quiet=False):
@@ -280,17 +243,16 @@ def scrape_single_post_url(url, cookies=None, fb_dtsg=None, progress=None):
     if post_info is None:
         post_info = {}
 
-    if not post_info.get("post_title"):
-        metadata = fetch_page_metadata(
-            url,
-            cookies=cookies,
-            post_type=resolved["post_type"],
-            quiet=quiet,
-        )
-        if metadata.get("post_title"):
-            post_info["post_title"] = metadata["post_title"]
-
-    post_title = post_info.get("post_title")
+    post_title = resolve_post_title(
+        url,
+        resolved["post_type"],
+        post_info=post_info,
+        cookies=cookies,
+        fb_dtsg=fb_dtsg,
+        quiet=quiet,
+    )
+    if post_title:
+        post_info["post_title"] = post_title
 
     result = {
         "post_id": resolved["content_id"],

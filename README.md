@@ -65,7 +65,7 @@ Each batch JSON file contains:
 Each post entry includes:
 
 - `post_type` — `group_post`, `profile_post`, or `reel`
-- `post_title` — post message/body text when available
+- `post_title` — full post message/body text when available (via GraphQL story query, with HTML fallback)
 - `group_slug` — present for group posts (e.g. `developerkaki` from `/groups/developerkaki/posts/...`)
 
 Each comment includes `author`, `author_id`, `text`, `reaction_count`, and `replies[]` (with `reply_id`, `author`, etc.).
