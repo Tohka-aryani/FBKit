@@ -59,8 +59,14 @@ Each batch JSON file contains:
 
 - `scraped_at` — human-readable run time (e.g. `2026-07-01 17:03:00`)
 - `post_count`, `succeeded`, `failed`
-- `posts[]` — each entry has `post_id`, `source_url`, `post_info`, and `comments[]`
+- `posts[]` — each entry has `post_id`, `content_type`, `post_type`, `post_title`, `source_url`, `post_info`, and `comments[]`
 - `failures[]` — optional list of `{url, error}` for URLs that could not be scraped
+
+Each post entry includes:
+
+- `post_type` — `group_post`, `profile_post`, or `reel`
+- `post_title` — post message/body text when available
+- `group_slug` — present for group posts (e.g. `developerkaki` from `/groups/developerkaki/posts/...`)
 
 Each comment includes `author`, `author_id`, `text`, `reaction_count`, and `replies[]` (with `reply_id`, `author`, etc.).
 

@@ -164,6 +164,47 @@ def clean_comment_item(item):
     return {k: v for k, v in item.items() if not k.startswith("_")}
 
 
+def _extract_message_text(story):
+    """Extract post message/body text from a parent_post_story node."""
+    message = story.get("message") or {}
+    text = message.get("text")
+    if text:
+        return text
+
+    nested_story = story.get("story") or {}
+    nested_message = nested_story.get("message") or {}
+    text = nested_message.get("text")
+    if text:
+        return text
+
+    for attachment in story.get("attachments") or []:
+        title = attachment.get("title")
+        if title:
+            return title
+        description = attachment.get("description")
+        if description:
+            return description
+
+    return None
+
+
+def extract_post_info(parent_post_story):
+    """Build post_info dict from a parent_post_story GraphQL node."""
+    post_info = {
+        "post_story_id": parent_post_story.get("id"),
+        "media_id": None,
+        "post_title": _extract_message_text(parent_post_story),
+    }
+
+    for attachment in parent_post_story.get("attachments") or []:
+        media = attachment.get("media") or {}
+        if media.get("id"):
+            post_info["media_id"] = media.get("id")
+            break
+
+    return post_info
+
+
 def fb_json(response_text):
     """
     Facebook GraphQL sometimes returns:
@@ -225,21 +266,8 @@ def _fetch_comments_once(feedback_id, cookies=None, progress=None):
             # Extract parent_post_story info from first response
             if response_count == 1 and post_info is None:
                 parent_post_story = n.get("parent_post_story", {})
-                
                 if parent_post_story:
-                    post_info = {
-                        "post_story_id": parent_post_story.get("id"),
-                        "media_id": None
-                    }
-                    
-                    # Extract first media ID
-                    attachments = parent_post_story.get("attachments", [])
-                    for attachment in attachments:
-                        media = attachment.get("media", {})
-                        if media and media.get("id"):
-                            post_info["media_id"] = media.get("id")
-                            break  # Only get first one
-                    
+                    post_info = extract_post_info(parent_post_story)
                     if progress is None:
                         print(f"📎 Extracted post info: {post_info}")
 

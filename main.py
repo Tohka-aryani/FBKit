@@ -42,6 +42,56 @@ def make_run_timestamp(when=None):
     return display, filename
 
 
+def classify_post_url(url):
+    """Classify a Facebook URL as group_post, profile_post, or reel."""
+    if extract_video_id_from_url(url):
+        return {"post_type": "reel", "group_slug": None}
+
+    group_match = re.search(r"/groups/([^/]+)/posts/", url)
+    if group_match:
+        return {"post_type": "group_post", "group_slug": group_match.group(1)}
+
+    return {"post_type": "profile_post", "group_slug": None}
+
+
+def _parse_meta_content(html, property_name):
+    match = re.search(
+        rf'<meta property="{re.escape(property_name)}" content="([^"]*)"',
+        html,
+    )
+    return unescape(match.group(1)).strip() if match else None
+
+
+def fetch_page_metadata(url, cookies=None, post_type=None, quiet=False):
+    """Fetch post title from page HTML when GraphQL does not provide it."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    try:
+        if not quiet:
+            print(f"  Fetching page metadata: {url}")
+        response = requests.get(
+            url, headers=headers, cookies=cookies, proxies=PROXIES, timeout=20
+        )
+        html = response.text
+
+        post_title = _parse_meta_content(html, "og:description")
+        if not post_title:
+            og_title = _parse_meta_content(html, "og:title")
+            if og_title and post_type == "group_post" and " | " in og_title:
+                post_title = og_title.split(" | ", 1)[1].strip()
+            else:
+                post_title = og_title
+
+        return {"post_title": post_title or None}
+    except Exception as e:
+        if not quiet:
+            print(f"  Error fetching page metadata: {e}")
+        return {"post_title": None}
+
+
 def extract_post_id_from_url(url, cookies=None, quiet=False):
     """Extract Facebook Post ID from a post URL."""
     url_patterns = [
@@ -121,6 +171,8 @@ def convert_post_id_to_feedback_id(post_id):
 
 def resolve_url(url, cookies=None, quiet=False):
     """Resolve a Facebook post or reel URL to scrape targets."""
+    classification = classify_post_url(url)
+
     video_id = extract_video_id_from_url(url)
     if video_id:
         if not quiet:
@@ -131,6 +183,8 @@ def resolve_url(url, cookies=None, quiet=False):
         return {
             "content_id": video_id,
             "content_type": "reel",
+            "post_type": classification["post_type"],
+            "group_slug": classification["group_slug"],
             "feedback_id": feedback_id,
         }
 
@@ -139,6 +193,8 @@ def resolve_url(url, cookies=None, quiet=False):
         return {
             "content_id": post_id,
             "content_type": "post",
+            "post_type": classification["post_type"],
+            "group_slug": classification["group_slug"],
             "feedback_id": convert_post_id_to_feedback_id(post_id),
         }
 
@@ -221,13 +277,34 @@ def scrape_single_post_url(url, cookies=None, fb_dtsg=None, progress=None):
         feedback_id=resolved["feedback_id"],
     )
 
-    return {
+    if post_info is None:
+        post_info = {}
+
+    if not post_info.get("post_title"):
+        metadata = fetch_page_metadata(
+            url,
+            cookies=cookies,
+            post_type=resolved["post_type"],
+            quiet=quiet,
+        )
+        if metadata.get("post_title"):
+            post_info["post_title"] = metadata["post_title"]
+
+    post_title = post_info.get("post_title")
+
+    result = {
         "post_id": resolved["content_id"],
         "content_type": resolved["content_type"],
+        "post_type": resolved["post_type"],
+        "post_title": post_title,
         "source_url": url,
         "post_info": post_info,
         "comments": comments,
     }
+    if resolved.get("group_slug"):
+        result["group_slug"] = resolved["group_slug"]
+
+    return result
 
 
 def scrape_posts_from_file(filepath=POST_URL_FILE, cookies=None, fb_dtsg=None):
