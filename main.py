@@ -55,11 +55,19 @@ def classify_post_url(url):
     return {"post_type": "profile_post", "group_slug": None}
 
 
+def extract_pfbid_from_url(url):
+    """Extract a pfbid token from a Facebook post URL when present."""
+    match = re.search(r"(pfbid[0-9A-Za-z]+)", url)
+    return match.group(1) if match else None
+
+
 def extract_post_id_from_url(url, cookies=None, quiet=False):
     """Extract Facebook Post ID from a post URL."""
     url_patterns = [
         r"/groups/[^/]+/posts/(\d+)",
         r"/posts/(\d+)",
+        r"[?&]story_fbid=(\d+)",
+        r"/permalink/(\d+)",
     ]
 
     for pattern in url_patterns:
@@ -71,7 +79,7 @@ def extract_post_id_from_url(url, cookies=None, quiet=False):
             return post_id
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User-Agent": "Mozilla/5.0",
         "Accept-Language": "en-US,en;q=0.9",
     }
 
@@ -101,6 +109,22 @@ def extract_post_id_from_url(url, cookies=None, quiet=False):
                     if not quiet:
                         print(f"  Could not decode storyID: {e}")
 
+        # Prefer storyID even without cookies; it encodes the numeric post id.
+        story_id_match = re.search(r'"storyID":"([^"]+)"', html)
+        if story_id_match:
+            try:
+                story_id_decoded = base64.b64decode(
+                    story_id_match.group(1)
+                ).decode("utf-8")
+                parts = story_id_decoded.split(":")
+                if len(parts) >= 2 and parts[-1].isdigit():
+                    post_id = parts[-1]
+                    if not quiet:
+                        print(f"  Found Post ID from storyID: {post_id}")
+                    return post_id
+            except Exception:
+                pass
+
         og_url_match = re.search(
             r'<meta property="og:url" content="([^"]+)"', html
         )
@@ -128,7 +152,7 @@ def extract_post_id_from_url(url, cookies=None, quiet=False):
 
 
 def convert_post_id_to_feedback_id(post_id):
-    """Convert post_id to feedback_id using base64 encoding."""
+    """Convert a numeric post id or pfbid token into a GraphQL feedback id."""
     return base64.b64encode(f"feedback:{post_id}".encode()).decode()
 
 
@@ -149,6 +173,21 @@ def resolve_url(url, cookies=None, quiet=False):
             "post_type": classification["post_type"],
             "group_slug": classification["group_slug"],
             "feedback_id": feedback_id,
+        }
+
+    # Modern share URLs expose a pfbid. Encoding feedback:<pfbid> is required;
+    # feedback:<numeric_post_id> from og:url often resolves to a null node.
+    pfbid = extract_pfbid_from_url(url)
+    if pfbid:
+        if not quiet:
+            print(f"  Found pfbid in URL: {pfbid}")
+        post_id = extract_post_id_from_url(url, cookies=cookies, quiet=quiet)
+        return {
+            "content_id": post_id or pfbid,
+            "content_type": "post",
+            "post_type": classification["post_type"],
+            "group_slug": classification["group_slug"],
+            "feedback_id": convert_post_id_to_feedback_id(pfbid),
         }
 
     post_id = extract_post_id_from_url(url, cookies=cookies, quiet=quiet)

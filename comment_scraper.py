@@ -9,7 +9,9 @@ load_dotenv()
 
 GRAPHQL = "https://www.facebook.com/api/graphql/"
 
-# Base headers for all requests
+# Base headers for all requests.
+# Keep the UA bare: a full Chrome UA makes Facebook expect browser-only headers
+# and reject GraphQL with AJAX error 1357054.
 BASE_HEADERS = {
     "user-agent": "Mozilla/5.0",
     "content-type": "application/x-www-form-urlencoded"
@@ -21,6 +23,26 @@ PROXIES = {'http': PROXY, 'https': PROXY} if PROXY else None
 
 # FB_DTSG token (set by UI when provided)
 FB_DTSG = ""
+
+# GraphQL persisted-query IDs (Facebook rotates these; refresh if queries fail).
+COMMENTS_DOC_ID = os.getenv("FB_COMMENTS_DOC_ID", "27806180149070312")
+REPLIES_DOC_ID = os.getenv("FB_REPLIES_DOC_ID", "27888228590762910")
+FEED_LOCATION = "POST_PERMALINK_DIALOG"
+COMMENTS_INTENT_TOKEN = "REVERSE_CHRONOLOGICAL_UNFILTERED_INTENT_V1"
+
+# Required Relay provider vars for the current UFI comment/reply queries.
+# Omitting these yields missing_required_variable_value.
+UFI_COMMENT_PROVIDER_VARS = {
+    "__relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider": "ORIGINAL",
+    "__relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider": False,
+    "__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider": False,
+    "__relay_internal__pv__IsWorkUserrelayprovider": False,
+}
+
+STALE_QUERY_MARKERS = (
+    "missing_required_variable_value",
+    "VariableNotFoundError",
+)
 
 if PROXY:
     print(f"Using proxy: {PROXY}")
@@ -75,56 +97,62 @@ def retry_request(url, headers, data, proxies, cookies=None, max_retries=5):
 
 # ===== PAYLOADS =====
 
-def comments_payload(feedback_id, cursor=None, cookies=None):
-    # Extract user ID from cookies if available
-    user_id = "0"
+def _actor_id(cookies=None):
     if cookies and "c_user" in cookies:
-        user_id = cookies["c_user"]
-    
+        return cookies["c_user"]
+    return "0"
+
+
+def comments_payload(feedback_id, cursor=None, cookies=None):
+    user_id = _actor_id(cookies)
+
     return {
         "av": user_id,
         "__user": user_id,
         "__a": "1",
         "fb_dtsg": FB_DTSG if FB_DTSG else "",
-        "doc_id": "25550760954572974",
+        "doc_id": COMMENTS_DOC_ID,
         "variables": json.dumps({
             "commentsAfterCount": -1,
             "commentsAfterCursor": cursor,
-            "commentsIntentToken": "REVERSE_CHRONOLOGICAL_UNFILTERED_INTENT_V1",
-            "feedLocation": "DEDICATED_COMMENTING_SURFACE",
+            "commentsBeforeCount": None,
+            "commentsBeforeCursor": None,
+            "commentsIntentToken": COMMENTS_INTENT_TOKEN,
+            "feedLocation": FEED_LOCATION,
             "focusCommentID": None,
             "scale": 2,
             "useDefaultActor": False,
-            "id": feedback_id
-        })
+            "id": feedback_id,
+            **UFI_COMMENT_PROVIDER_VARS,
+        }, separators=(",", ":")),
     }
 
 
 def replies_payload(comment_feedback_id, expansion_token, cursor=None, cookies=None):
-    # Extract user ID from cookies if available
-    user_id = "0"
-    if cookies and "c_user" in cookies:
-        user_id = cookies["c_user"]
+    user_id = _actor_id(cookies)
 
     variables = {
         "clientKey": None,
         "expansionToken": expansion_token,
-        "feedLocation": "POST_PERMALINK_DIALOG",
+        "feedLocation": FEED_LOCATION,
         "focusCommentID": None,
+        "repliesAfterCount": None,
+        "repliesAfterCursor": cursor,
+        "repliesBeforeCount": None,
+        "repliesBeforeCursor": None,
         "scale": 2,
         "useDefaultActor": False,
         "id": comment_feedback_id,
+        **UFI_COMMENT_PROVIDER_VARS,
     }
-    if cursor:
-        variables["after"] = cursor
 
     return {
         "av": user_id,
         "__user": user_id,
         "__a": "1",
         "fb_dtsg": FB_DTSG if FB_DTSG else "",
-        "doc_id": "26570577339199586",
-        "variables": json.dumps(variables),
+        "doc_id": REPLIES_DOC_ID,
+        "variables": json.dumps(variables, separators=(",", ":")),
     }
 
 # ===== FETCH COMMENTS =====
@@ -226,6 +254,24 @@ def fb_json(response_text):
     return json.loads(first)
 
 
+def _raise_if_stale_query(payload, where):
+    """Raise when Facebook rejects the persisted query schema/doc_id."""
+    errors = payload.get("errors") or []
+    for err in errors:
+        message = str(err.get("message") or "")
+        if any(marker in message for marker in STALE_QUERY_MARKERS):
+            raise RuntimeError(
+                f"Facebook rejected the {where} query as stale "
+                f"(doc_id/variables out of date): {message}"
+            )
+
+    # AJAX-style envelope used when browser headers don't match the UA.
+    ajax_error = payload.get("error")
+    if ajax_error and payload.get("payload") is None and "data" not in payload:
+        summary = payload.get("errorSummary") or ajax_error
+        raise RuntimeError(f"Facebook rejected the {where} request: {summary}")
+
+
 def _fetch_comments_once(feedback_id, cookies=None, progress=None):
     results = []
     seen_comment_ids = set()
@@ -244,14 +290,19 @@ def _fetch_comments_once(feedback_id, cookies=None, progress=None):
             cookies=cookies
         )
         j = fb_json(r.text)
-        
+        _raise_if_stale_query(j, "comments")
+
         response_count += 1
-        
+
+        node = (j.get("data") or {}).get("node")
+        if node is None:
+            if response_count == 1 and progress is None:
+                print("  No comment node returned for this feedback ID")
+            break
+
         comments_block = (
-            j.get("data", {})
-             .get("node", {})
-             .get("comment_rendering_instance_for_feed_location", {})
-             .get("comments", {})
+            node.get("comment_rendering_instance_for_feed_location", {})
+                .get("comments", {})
         )
 
         edges = comments_block.get("edges", [])
@@ -352,11 +403,9 @@ def fetch_replies(comment, cookies=None):
         )
 
         j = fb_json(r.text)
-        replies_block = (
-            j.get("data", {})
-            .get("node", {})
-            .get("replies_connection", {})
-        )
+        _raise_if_stale_query(j, "replies")
+        node = (j.get("data") or {}).get("node") or {}
+        replies_block = node.get("replies_connection", {})
         edges = replies_block.get("edges", [])
         if not edges:
             break
